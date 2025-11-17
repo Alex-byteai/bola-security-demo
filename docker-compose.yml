@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  # API Segura
+  app_secure:
+    build: ./app_secure
+    ports:
+      - "3001:3001"  # API
+      - "8081:8081"  # WebSocket
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+    volumes:
+      - ./app_secure/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - security-demo
+
+  # API Vulnerable
+  app_vulnerable:
+    build: ./app_vulnerable
+    ports:
+      - "3000:3000"  # API
+      - "8082:8081"  # WebSocket (mapeado a puerto diferente)
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET}
+    volumes:
+      - ./app_vulnerable/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - security-demo
+
+  # Dashboard
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3002:3002"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - app_secure
+      - app_vulnerable
+    networks:
+      - security-demo
+
+networks:
+  security-demo:
+    driver: bridge
+
+volumes:
+  secure_logs:
+  vulnerable_logs:
