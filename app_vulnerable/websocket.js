@@ -7,55 +7,91 @@ const wss = new WebSocket.Server({ port: PORT });
 
 console.log(`🔌 WebSocket server running on port ${PORT}`);
 
-// Vigilar cambios en el archivo de logs
 const logFile = path.join(__dirname, 'logs', 'security.log');
+
+const readJsonLines = (raw = '') => raw
+  .split('\n')
+  .filter(line => line.trim())
+  .map(line => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  })
+  .filter(Boolean);
 
 wss.on('connection', (ws) => {
   console.log('✅ Cliente conectado al WebSocket');
 
-  // Enviar logs existentes al conectar
-  if (fs.existsSync(logFile)) {
-    const logs = fs.readFileSync(logFile, 'utf8')
-      .split('\n')
-      .filter(line => line.trim())
-      .slice(-20) // Últimas 20 líneas
-      .map(line => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return null;
-        }
-      })
-      .filter(log => log !== null);
+  let lastSize = 0;
 
-    ws.send(JSON.stringify({ type: 'initial', logs }));
+  if (fs.existsSync(logFile)) {
+    const fileContent = fs.readFileSync(logFile, 'utf8');
+    const logs = readJsonLines(fileContent).slice(-20);
+
+    if (logs.length) {
+      ws.send(JSON.stringify({ type: 'initial', logs }));
+    }
+
+    try {
+      lastSize = fs.statSync(logFile).size;
+    } catch {
+      lastSize = fileContent.length;
+    }
   }
 
-  // Vigilar nuevos logs
-  const watcher = fs.watch(logFile, (eventType) => {
-    if (eventType === 'change') {
-      const logs = fs.readFileSync(logFile, 'utf8')
-        .split('\n')
-        .filter(line => line.trim())
-        .slice(-1) // Última línea
-        .map(line => {
-          try {
-            return JSON.parse(line);
-          } catch {
-            return null;
-          }
-        })
-        .filter(log => log !== null);
-
-      if (logs.length > 0) {
-        ws.send(JSON.stringify({ type: 'new', log: logs[0] }));
+  const emitNewLines = () => {
+    fs.stat(logFile, (err, stats) => {
+      if (err || !stats) {
+        return;
       }
-    }
-  });
+
+      const newSize = stats.size;
+
+      if (newSize < lastSize) {
+        lastSize = 0;
+      }
+
+      if (newSize === lastSize) {
+        return;
+      }
+
+      const readStream = fs.createReadStream(logFile, { start: lastSize, end: newSize - 1, encoding: 'utf8' });
+      let buffer = '';
+
+      readStream.on('data', chunk => {
+        buffer += chunk;
+      });
+
+      readStream.on('end', () => {
+        lastSize = newSize;
+        const logs = readJsonLines(buffer);
+        logs.forEach(log => {
+          ws.send(JSON.stringify({ type: 'new', log }));
+        });
+      });
+
+      readStream.on('error', () => {
+        lastSize = newSize;
+      });
+    });
+  };
+
+  let watcher;
+  if (fs.existsSync(logFile)) {
+    watcher = fs.watch(logFile, (eventType) => {
+      if (eventType === 'change') {
+        emitNewLines();
+      }
+    });
+  }
 
   ws.on('close', () => {
     console.log('❌ Cliente desconectado');
-    watcher.close();
+    if (watcher) {
+      watcher.close();
+    }
   });
 });
 

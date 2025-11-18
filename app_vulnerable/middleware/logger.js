@@ -41,18 +41,21 @@ const logger = winston.createLogger({
 });
 
 // Función para detectar intentos BOLA
-const detectBOLAAttempt = (req, user, resourceOwnerId) => {
-  if (user && user.id !== resourceOwnerId) {
+const detectBOLAAttempt = (req, user, resourceOwnerId, context = {}) => {
+  if (user && resourceOwnerId && user.id !== resourceOwnerId) {
     logSecurityEvent('BOLA_ATTEMPT', {
-      message: `Intento de acceso no autorizado a recurso`,
+      message: context.message || 'Intento de acceso no autorizado a recurso',
       attacker: user.email,
       attackerId: user.id,
       victimId: resourceOwnerId,
       endpoint: req.originalUrl,
       method: req.method,
+      action: context.action || `${req.method} ${req.originalUrl}`,
+      resourceType: context.resourceType || 'unknown',
+      targetId: context.targetId,
       ip: req.ip || req.connection.remoteAddress,
       userAgent: req.get('user-agent'),
-      severity: 'HIGH'
+      severity: context.severity || 'HIGH'
     });
     return true;
   }
@@ -96,14 +99,15 @@ const loggerMiddleware = (req, res, next) => {
       action: requestContext.action,
       resource: requestContext.resource,
       module: requestContext.module,
-      message: requestContext.action
+      message: requestContext.action,
+      severity: 'INFO'
     };
 
     // Detectar posibles ataques BOLA en órdenes
     if (req.originalUrl.includes('/orders/') && req.method === 'GET') {
       const orderId = req.params.id;
-      logData.securityEvent = 'ORDER_ACCESS_ATTEMPT';
-      logData.orderId = orderId;
+      logData.securityEvent = logData.securityEvent || 'ORDER_ACCESS_ATTEMPT';
+      logData.orderId = logData.orderId || orderId;
       logData.requestedBy = req.user ? req.user.id : 'unauthenticated';
       
       // Si el código de estado es 200, podría ser un acceso exitoso
@@ -116,7 +120,7 @@ const loggerMiddleware = (req, res, next) => {
     // Detectar BOLA en usuarios
     if (req.originalUrl.includes('/users/') && req.method === 'GET') {
       const userId = req.params.id;
-      logData.securityEvent = 'USER_DATA_ACCESS_ATTEMPT';
+      logData.securityEvent = logData.securityEvent || 'USER_DATA_ACCESS_ATTEMPT';
       logData.targetUserId = userId;
       
       if (res.statusCode === 200 && req.user && parseInt(userId) !== req.user.id) {
@@ -125,8 +129,21 @@ const loggerMiddleware = (req, res, next) => {
       }
     }
 
+    if (res.locals && res.locals.securityEvent) {
+      logData.securityEvent = res.locals.securityEvent;
+      logData.event = res.locals.securityEvent;
+      logData.severity = res.locals.securitySeverity || logData.severity || 'HIGH';
+      logData.message = res.locals.securityMessage || logData.message;
+
+      if (res.locals.securityMeta && typeof res.locals.securityMeta === 'object') {
+        Object.assign(logData, res.locals.securityMeta);
+      }
+    }
+
     // Log diferente según el código de estado
-    if (res.statusCode >= 400) {
+    const shouldWarn = res.statusCode >= 400 || (logData.severity && ['WARNING', 'HIGH', 'CRITICAL'].includes(logData.severity));
+
+    if (shouldWarn) {
       logger.warn(logData);
     } else {
       logger.info(logData);

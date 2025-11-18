@@ -10,7 +10,6 @@ router.get('/:id', authenticateToken, (req, res) => {
   const orderId = req.params.id;
   const requestingUser = req.user;
 
-  // ⚠️ FALLA CRÍTICA: No se verifica si la orden pertenece al usuario
   db.get('SELECT * FROM orders WHERE id = ?', [orderId], (err, order) => {
     if (err) {
       return res.status(500).json({ error: 'Error en el servidor' });
@@ -20,12 +19,40 @@ router.get('/:id', authenticateToken, (req, res) => {
       return res.status(404).json({ error: 'Orden no encontrada' });
     }
 
-    // Registrar evento de seguridad si se detecta BOLA
-    if (detectBOLAAttempt(req, requestingUser, order.user_id)) {
-      console.log(`🚨 BOLA DETECTADO: Usuario ${requestingUser.email} accedió a orden ${orderId} del usuario ${order.user_id}`);
+    const isForeignOrder = requestingUser.id !== order.user_id;
+
+    if (isForeignOrder) {
+      detectBOLAAttempt(req, requestingUser, order.user_id, {
+        message: `Lectura de orden ajena #${orderId}`,
+        action: 'READ_FOREIGN_ORDER',
+        resourceType: 'order',
+        targetId: orderId,
+        severity: 'HIGH'
+      });
+
+      logSecurityEvent('ORDER_ACCESS_BOLA', {
+        message: 'Orden ajena consultada sin bloqueo',
+        userId: requestingUser.id,
+        userEmail: requestingUser.email,
+        orderId,
+        victimId: order.user_id,
+        blocked: false,
+        severity: 'HIGH'
+      });
+
+      res.locals.securityEvent = 'ORDER_ACCESS_BOLA';
+      res.locals.securitySeverity = 'HIGH';
+      res.locals.securityMessage = `BOLA: ${requestingUser.email} accedió a orden ajena #${orderId}`;
+      res.locals.securityMeta = {
+        orderId,
+        victimId: order.user_id,
+        attackerId: requestingUser.id,
+        attacker: requestingUser.email,
+        blocked: false,
+        vulnerability: 'BOLA_ORDER_ACCESS'
+      };
     }
 
-    // ⚠️ Se devuelve la orden sin importar a quién pertenece
     res.json({
       success: true,
       order: {
@@ -34,13 +61,17 @@ router.get('/:id', authenticateToken, (req, res) => {
         product: order.product,
         amount: order.amount,
         status: order.status,
-        creditCard: order.credit_card,  // ⚠️ Información sensible expuesta
+        creditCard: order.credit_card,
         address: order.address,
         phone: order.phone,
         createdAt: order.created_at
       },
-      // ⚠️ Para fines educativos: indicar explícitamente la vulnerabilidad
-      security_note: "VULNERABLE: Esta endpoint no verifica la propiedad del recurso (BOLA)"
+      security_note: isForeignOrder
+        ? 'VULNERABLE: Acceso a órdenes ajenas NO bloqueado (BOLA)'
+        : 'Acceso autorizado a orden propia',
+      should_block: isForeignOrder,
+      blocked: false,
+      enforcement: isForeignOrder ? 'not_blocked' : 'owner_only'
     });
   });
 });
@@ -99,70 +130,146 @@ router.put('/:id', authenticateToken, (req, res) => {
   const orderId = req.params.id;
   const { status } = req.body;
 
-  // ⚠️ No se verifica ownership antes de actualizar
-  db.run(
-    'UPDATE orders SET status = ? WHERE id = ?',
-    [status, orderId],
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: 'Error al actualizar' });
-      }
-
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Orden no encontrada' });
-      }
-
-      // Obtener detalles de la orden para logging
-      db.get('SELECT * FROM orders WHERE id = ?', [orderId], (err, order) => {
-        if (!err && order) {
-          detectBOLAAttempt(req, req.user, order.user_id);
-        }
-      });
-
-      logSecurityEvent('ORDER_MODIFIED_BOLA', {
-        message: 'Orden modificada sin verificación de propiedad',
-        userId: req.user.id,
-        userEmail: req.user.email,
-        orderId,
-        newStatus: status,
-        severity: 'HIGH'
-      });
-
-      res.json({ 
-        success: true, 
-        message: 'Orden actualizada',
-        security_note: "VULNERABLE: Modificación sin verificación de propiedad"
-      });
+  db.get('SELECT * FROM orders WHERE id = ?', [orderId], (err, order) => {
+    if (err) {
+      return res.status(500).json({ error: 'Error en el servidor' });
     }
-  );
+
+    if (!order) {
+      return res.status(404).json({ error: 'Orden no encontrada' });
+    }
+
+    const isForeignOrder = req.user.id !== order.user_id;
+
+    db.run(
+      'UPDATE orders SET status = ? WHERE id = ?',
+      [status, orderId],
+      function(updateErr) {
+        if (updateErr) {
+          return res.status(500).json({ error: 'Error al actualizar' });
+        }
+
+        if (this.changes === 0) {
+          return res.status(404).json({ error: 'Orden no encontrada' });
+        }
+
+        if (isForeignOrder) {
+          detectBOLAAttempt(req, req.user, order.user_id, {
+            message: `Modificación de orden ajena #${orderId}`,
+            action: 'UPDATE_FOREIGN_ORDER',
+            resourceType: 'order',
+            targetId: orderId,
+            severity: 'CRITICAL'
+          });
+
+          logSecurityEvent('ORDER_MODIFIED_BOLA', {
+            message: 'Orden ajena modificada sin bloqueo',
+            userId: req.user.id,
+            userEmail: req.user.email,
+            orderId,
+            previousStatus: order.status,
+            newStatus: status,
+            victimId: order.user_id,
+            blocked: false,
+            severity: 'CRITICAL'
+          });
+
+          res.locals.securityEvent = 'ORDER_MODIFIED_BOLA';
+          res.locals.securitySeverity = 'CRITICAL';
+          res.locals.securityMessage = `BOLA: ${req.user.email} modificó orden ajena #${orderId}`;
+          res.locals.securityMeta = {
+            orderId,
+            victimId: order.user_id,
+            attackerId: req.user.id,
+            attacker: req.user.email,
+            previousStatus: order.status,
+            newStatus: status,
+            blocked: false,
+            vulnerability: 'BOLA_ORDER_UPDATE'
+          };
+        }
+
+        res.json({
+          success: true,
+          message: 'Orden actualizada',
+          security_note: isForeignOrder
+            ? 'VULNERABLE: Modificación de orden ajena NO bloqueada (BOLA)'
+            : 'Orden actualizada (mismo propietario)',
+          should_block: isForeignOrder,
+          blocked: false,
+          enforcement: isForeignOrder ? 'not_blocked' : 'owner_only'
+        });
+      }
+    );
+  });
 });
 
 // ⚠️ VULNERABILIDAD: Eliminar orden sin verificación
 router.delete('/:id', authenticateToken, (req, res) => {
   const orderId = req.params.id;
 
-  // ⚠️ Cualquier usuario autenticado puede eliminar cualquier orden
-  db.run('DELETE FROM orders WHERE id = ?', [orderId], function(err) {
+  db.get('SELECT * FROM orders WHERE id = ?', [orderId], (err, order) => {
     if (err) {
-      return res.status(500).json({ error: 'Error al eliminar' });
+      return res.status(500).json({ error: 'Error en el servidor' });
     }
 
-    if (this.changes === 0) {
+    if (!order) {
       return res.status(404).json({ error: 'Orden no encontrada' });
     }
 
-    logSecurityEvent('ORDER_DELETED_BOLA', {
-      message: '🚨 CRÍTICO: Orden eliminada sin verificación de propiedad',
-      userId: req.user.id,
-      userEmail: req.user.email,
-      orderId,
-      severity: 'CRITICAL'
-    });
+    const isForeignOrder = req.user.id !== order.user_id;
 
-    res.json({ 
-      success: true, 
-      message: 'Orden eliminada',
-      security_note: "VULNERABLE: Eliminación sin verificación de propiedad"
+    db.run('DELETE FROM orders WHERE id = ?', [orderId], function(deleteErr) {
+      if (deleteErr) {
+        return res.status(500).json({ error: 'Error al eliminar' });
+      }
+
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Orden no encontrada' });
+      }
+
+      if (isForeignOrder) {
+        detectBOLAAttempt(req, req.user, order.user_id, {
+          message: `Eliminación de orden ajena #${orderId}`,
+          action: 'DELETE_FOREIGN_ORDER',
+          resourceType: 'order',
+          targetId: orderId,
+          severity: 'CRITICAL'
+        });
+
+        logSecurityEvent('ORDER_DELETED_BOLA', {
+          message: 'Orden ajena eliminada sin bloqueo',
+          userId: req.user.id,
+          userEmail: req.user.email,
+          orderId,
+          victimId: order.user_id,
+          blocked: false,
+          severity: 'CRITICAL'
+        });
+
+        res.locals.securityEvent = 'ORDER_DELETED_BOLA';
+        res.locals.securitySeverity = 'CRITICAL';
+        res.locals.securityMessage = `BOLA: ${req.user.email} eliminó orden ajena #${orderId}`;
+        res.locals.securityMeta = {
+          orderId,
+          victimId: order.user_id,
+          attackerId: req.user.id,
+          attacker: req.user.email,
+          blocked: false,
+          vulnerability: 'BOLA_ORDER_DELETE'
+        };
+      }
+
+      res.json({
+        success: true,
+        message: 'Orden eliminada',
+        security_note: isForeignOrder
+          ? 'VULNERABLE: Eliminación de orden ajena NO bloqueada (BOLA)'
+          : 'Orden eliminada (propietario)',
+        should_block: isForeignOrder,
+        blocked: false,
+        enforcement: isForeignOrder ? 'not_blocked' : 'owner_only'
+      });
     });
   });
 });

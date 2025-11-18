@@ -49,6 +49,17 @@ router.get('/:id', authenticateToken, validateOrderId, (req, res) => {
           attemptedOrderId: orderId,
           severity: 'HIGH'
         });
+
+        res.locals.securityEvent = 'UNAUTHORIZED_ACCESS_BLOCKED';
+        res.locals.securitySeverity = 'HIGH';
+        res.locals.securityMessage = `🛡️ Acceso bloqueado a orden ${orderId}`;
+        res.locals.securityMeta = {
+          attemptedOrderId: orderId,
+          attackerId: userId,
+          attacker: req.user.email,
+          enforcement: 'owner_only',
+          blocked: true
+        };
         
         return res.status(404).json({ 
           error: 'Orden no encontrada o no tienes permiso para accederla' 
@@ -159,6 +170,17 @@ router.put('/:id', authenticateToken, validateOrderUpdate, (req, res) => {
           userId: userId,
           orderId: orderId
         });
+
+        res.locals.securityEvent = 'UNAUTHORIZED_UPDATE_BLOCKED';
+        res.locals.securitySeverity = 'HIGH';
+        res.locals.securityMessage = `🛡️ Actualización bloqueada para orden ${orderId}`;
+        res.locals.securityMeta = {
+          attemptedOrderId: orderId,
+          attackerId: userId,
+          attacker: req.user.email,
+          enforcement: 'owner_only',
+          blocked: true
+        };
         
         return res.status(404).json({ 
           error: 'Orden no encontrada o no tienes permiso' 
@@ -208,6 +230,17 @@ router.delete('/:id', authenticateToken, validateOrderId, (req, res) => {
           userId: userId,
           orderId: orderId
         });
+
+        res.locals.securityEvent = 'UNAUTHORIZED_DELETE_BLOCKED';
+        res.locals.securitySeverity = 'HIGH';
+        res.locals.securityMessage = `🛡️ Eliminación bloqueada para orden ${orderId}`;
+        res.locals.securityMeta = {
+          attemptedOrderId: orderId,
+          attackerId: userId,
+          attacker: req.user.email,
+          enforcement: 'owner_only',
+          blocked: true
+        };
         
         return res.status(404).json({ 
           error: 'Orden no encontrada o no tienes permiso' 

@@ -79,32 +79,46 @@ const loggerMiddleware = (req, res, next) => {
       action: requestContext.action,
       resource: requestContext.resource,
       module: requestContext.module,
-      message: requestContext.action
+      message: requestContext.action,
+      severity: 'INFO'
     };
+
+    if (res.locals && res.locals.securityEvent) {
+      logData.securityEvent = res.locals.securityEvent;
+      logData.event = res.locals.securityEvent;
+      logData.severity = res.locals.securitySeverity || logData.severity || 'HIGH';
+      logData.message = res.locals.securityMessage || logData.message;
+
+      if (res.locals.securityMeta && typeof res.locals.securityMeta === 'object') {
+        Object.assign(logData, res.locals.securityMeta);
+      }
+    }
 
     // Detectar accesos bloqueados (API segura)
     if (res.statusCode === 403) {
-      logData.securityEvent = 'ACCESS_BLOCKED';
-      logData.severity = 'HIGH';
-      logData.message = '🛡️ Acceso no autorizado bloqueado correctamente';
+      logData.securityEvent = logData.securityEvent || 'ACCESS_BLOCKED';
+      logData.severity = logData.severity === 'INFO' ? 'HIGH' : logData.severity;
+      logData.message = logData.message === requestContext.action ? '🛡️ Acceso no autorizado bloqueado correctamente' : logData.message;
       
-      // Log específico para bloqueos de seguridad
       logger.warn(logData);
     } 
     else if (res.statusCode === 401) {
-      logData.securityEvent = 'UNAUTHENTICATED_ACCESS';
-      logData.severity = 'MEDIUM';
+      logData.securityEvent = logData.securityEvent || 'UNAUTHENTICATED_ACCESS';
+      logData.severity = logData.severity === 'INFO' ? 'MEDIUM' : logData.severity;
       logger.warn(logData);
     }
     else if (res.statusCode === 429) {
-      logData.securityEvent = 'RATE_LIMIT_BLOCKED';
-      logData.severity = 'MEDIUM';
+      logData.securityEvent = logData.securityEvent || 'RATE_LIMIT_BLOCKED';
+      logData.severity = logData.severity === 'INFO' ? 'MEDIUM' : logData.severity;
       logger.warn(logData);
     }
-    else if (res.statusCode >= 400) {
-      logger.warn(logData);
-    } else {
-      logger.info(logData);
+    else {
+      const shouldWarn = res.statusCode >= 400 || (logData.severity && ['WARNING', 'HIGH', 'CRITICAL', 'MEDIUM'].includes(logData.severity));
+      if (shouldWarn) {
+        logger.warn(logData);
+      } else {
+        logger.info(logData);
+      }
     }
 
     // Log de acceso separado
